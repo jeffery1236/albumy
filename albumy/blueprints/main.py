@@ -6,6 +6,7 @@
     :license: MIT, see LICENSE for more details.
 """
 import os
+import time
 
 from flask import render_template, flash, redirect, url_for, current_app, \
     send_from_directory, request, abort, Blueprint
@@ -17,7 +18,8 @@ from albumy.extensions import db
 from albumy.forms.main import DescriptionForm, TagForm, CommentForm
 from albumy.models import User, Photo, Tag, Follow, Collect, Comment, Notification
 from albumy.notifications import push_comment_notification, push_collect_notification
-from albumy.utils import rename_image, resize_image, redirect_back, flash_errors
+from albumy.utils import rename_image, resize_image, redirect_back, flash_errors, get_image_caption, get_img_objs
+# from albumy.utils import rename_image, resize_image, redirect_back, flash_errors
 
 main_bp = Blueprint('main', __name__)
 
@@ -116,7 +118,7 @@ def get_avatar(filename):
 
 @main_bp.route('/upload', methods=['GET', 'POST'])
 @login_required
-@confirm_required
+# @confirm_required
 @permission_required('UPLOAD')
 def upload():
     if request.method == 'POST' and 'file' in request.files:
@@ -125,14 +127,29 @@ def upload():
         f.save(os.path.join(current_app.config['ALBUMY_UPLOAD_PATH'], filename))
         filename_s = resize_image(f, filename, current_app.config['ALBUMY_PHOTO_SIZE']['small'])
         filename_m = resize_image(f, filename, current_app.config['ALBUMY_PHOTO_SIZE']['medium'])
+        img_caption = get_image_caption(f) # Generate Image Captions using HuggingFace pretrained model
+        img_objs = get_img_objs(f) # Find objects within image using pretrained RetinaNet
         photo = Photo(
             filename=filename,
+            description=img_caption,
             filename_s=filename_s,
             filename_m=filename_m,
             author=current_user._get_current_object()
         )
         db.session.add(photo)
         db.session.commit()
+
+        for obj in img_objs: # Add each detected object as a Tag for photo
+            tag = Tag.query.filter_by(name=obj).first()
+            if tag is None:
+                tag = Tag(name=obj)
+                db.session.add(tag)
+                db.session.commit()
+            if tag not in photo.tags:
+                photo.tags.append(tag)
+                db.session.commit()
+                print(obj, "tag commited")
+
     return render_template('main/upload.html')
 
 

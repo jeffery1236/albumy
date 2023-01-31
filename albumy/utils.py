@@ -23,6 +23,37 @@ from albumy.extensions import db
 from albumy.models import User
 from albumy.settings import Operations
 
+## Added Packages for ML
+import numpy as np
+from transformers import VisionEncoderDecoderModel, ViTFeatureExtractor, AutoTokenizer
+import torch
+from torchvision.models import detection
+import pickle
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CLASS_NAMES = [
+    '__background__', 'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus',
+    'train', 'truck', 'boat', 'traffic light', 'fire hydrant', 'N/A', 'stop sign',
+    'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+    'elephant', 'bear', 'zebra', 'giraffe', 'N/A', 'backpack', 'umbrella', 'N/A', 'N/A',
+    'handbag', 'tie', 'suitcase', 'frisbee', 'skis', 'snowboard', 'sports ball',
+    'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard', 'tennis racket',
+    'bottle', 'N/A', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl',
+    'banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza',
+    'donut', 'cake', 'chair', 'couch', 'potted plant', 'bed', 'N/A', 'dining table',
+    'N/A', 'N/A', 'toilet', 'N/A', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+    'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'N/A', 'book',
+    'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
+]
+SCORE_THRES = 0.4
+
+img_caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning").to(DEVICE)
+img_caption_extractor = ViTFeatureExtractor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+img_caption_tokenizer = AutoTokenizer.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+
+obj_detection_model = detection.fasterrcnn_mobilenet_v3_large_320_fpn(pretrained=True, progress=False,
+	pretrained_backbone=True).to(DEVICE).eval()
+
 
 def generate_token(user, operation, expire_in=None, **kwargs):
     s = Serializer(current_app.config['SECRET_KEY'], expire_in)
@@ -104,3 +135,47 @@ def flash_errors(form):
                 getattr(form, field).label.text,
                 error
             ))
+
+# Function to generate text from image using huggingface API
+def get_image_caption(image_fp, max_length=16, num_beams=4):
+    # global img_caption_processor
+    # global img_caption_model
+
+    raw_image = Image.open(image_fp).convert('RGB')
+
+    # Unconditional Img captioning
+    # inputs = img_caption_processor(raw_image, return_tensors="pt")
+    pixel_values = img_caption_extractor(images=raw_image, return_tensors="pt").pixel_values.to(DEVICE)
+
+    output_ids = img_caption_model.generate(pixel_values, max_length=max_length, num_beams=num_beams)
+    preds = img_caption_tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+    preds = [pred.strip() for pred in preds]
+    return preds[0]
+
+# Function to find objects from image using pytorch's pretrained RetinaNet
+def get_img_objs(image_fp):
+    raw_image = Image.open(image_fp).convert('RGB')
+    img = process_img_obj_detection(raw_image)
+    res = obj_detection_model(img)[0]
+
+    objects = parse_obj_detection_result(res)
+    return objects
+
+# Helper function for obj detection to process input image
+def process_img_obj_detection(img, device=DEVICE):
+    img = np.swapaxes(img, 0, 2)
+    img = np.expand_dims(img, axis=0)
+    img = img / 255.0
+    img = torch.FloatTensor(img).to(DEVICE)
+    return img
+
+# Helper function for obj detection to process model results
+def parse_obj_detection_result(res, class_names=CLASS_NAMES):
+    objects = []
+    for label, score in zip(res['labels'], res['scores']):
+        if score >= SCORE_THRES:
+            if label < len(class_names):
+                objects.append(class_names[label.item()])
+        else:
+            break
+    return objects
